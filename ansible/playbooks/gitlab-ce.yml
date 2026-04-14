@@ -1,0 +1,187 @@
+---
+- name: Install and configure GitLab CE
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    gitlab_ipv4: ""
+    gitlab_external_url: "https://gitlab.example.local"
+    gitlab_fqdn: "gitlab.example.local"
+    gitlab_edition: "ce"
+    gitlab_tls_mode: "self-signed"
+    gitlab_ssl_dir: "/etc/gitlab/ssl"
+    gitlab_cert_path: "/etc/gitlab/ssl/{{ gitlab_fqdn }}.crt"
+    gitlab_key_path: "/etc/gitlab/ssl/{{ gitlab_fqdn }}.key"
+    gitlab_omnibus_config_inline: >-
+      external_url '{{ gitlab_external_url }}';
+      letsencrypt['enable'] = false;
+      nginx['redirect_http_to_https'] = true;
+      nginx['ssl_certificate'] = '{{ gitlab_cert_path }}';
+      nginx['ssl_certificate_key'] = '{{ gitlab_key_path }}'
+
+  tasks:
+    - name: Wait for VM to accept SSH connections
+      ansible.builtin.wait_for_connection:
+        delay: 10
+        timeout: 900
+
+    - name: Wait for cloud-init to finish if available
+      ansible.builtin.command: cloud-init status --wait
+      register: cloud_init_status
+      changed_when: false
+      failed_when: false
+
+    - name: Install base dependencies
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - gnupg
+          - openssh-server
+          - openssl
+          - postfix
+          - tzdata
+        state: present
+        update_cache: true
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: Ensure SSH service is enabled
+      ansible.builtin.service:
+        name: ssh
+        enabled: true
+        state: started
+
+    - name: Ensure /etc/hosts maps GitLab FQDN locally
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: ".*\\s{{ gitlab_fqdn | regex_escape() }}(\\s|$).*"
+        line: "{{ (gitlab_ipv4 | default(ansible_host, true)) }} {{ gitlab_fqdn }} {{ (gitlab_fqdn.split('.'))[0] }}"
+        state: present
+
+    - name: Ensure SSL directory exists before package installation
+      ansible.builtin.file:
+        path: "{{ gitlab_ssl_dir }}"
+        state: directory
+        owner: root
+        group: root
+        mode: "0700"
+
+    - name: Generate self-signed certificate before package installation
+      ansible.builtin.command: >
+        openssl req -x509 -nodes -newkey rsa:4096
+        -keyout {{ gitlab_key_path }}
+        -out {{ gitlab_cert_path }}
+        -days 825
+        -subj /CN={{ gitlab_fqdn }}
+      args:
+        creates: "{{ gitlab_cert_path }}"
+      when: gitlab_tls_mode == 'self-signed'
+
+    - name: Set certificate ownership and permissions before package installation
+      ansible.builtin.file:
+        path: "{{ item.path }}"
+        owner: root
+        group: root
+        mode: "{{ item.mode }}"
+      loop:
+        - { path: "{{ gitlab_key_path }}", mode: "0600" }
+        - { path: "{{ gitlab_cert_path }}", mode: "0644" }
+      when: gitlab_tls_mode == 'self-signed'
+
+    - name: Repair partially configured dpkg state if needed
+      ansible.builtin.command: dpkg --configure -a
+      register: dpkg_repair_result
+      changed_when: "'Setting up' in dpkg_repair_result.stdout"
+      failed_when: false
+      environment:
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: Add GitLab CE apt repository
+      ansible.builtin.shell: |
+        set -euo pipefail
+        curl --silent --show-error --location https://packages.gitlab.com/install/repositories/gitlab/gitlab-ce/script.deb.sh | bash
+      args:
+        executable: /bin/bash
+        creates: /etc/apt/sources.list.d/gitlab_gitlab-ce.list
+
+    - name: Install GitLab CE package (first attempt)
+      ansible.builtin.apt:
+        name: "gitlab-{{ gitlab_edition }}"
+        state: present
+        update_cache: true
+      register: gitlab_install_attempt_1
+      failed_when: false
+      environment:
+        EXTERNAL_URL: "{{ gitlab_external_url }}"
+        GITLAB_OMNIBUS_CONFIG: "{{ gitlab_omnibus_config_inline }}"
+        DEBIAN_FRONTEND: noninteractive
+
+    - name: Repair GitLab package state when first install attempt fails
+      when: gitlab_install_attempt_1 is failed
+      block:
+        - name: Reconfigure GitLab omnibus to recover post-install scripts
+          ansible.builtin.command: gitlab-ctl reconfigure
+          register: gitlab_reconfigure_repair
+          changed_when: >-
+            "Recipe:" in gitlab_reconfigure_repair.stdout
+            or "Running handlers" in gitlab_reconfigure_repair.stdout
+          failed_when: false
+
+        - name: Repair dpkg state after GitLab reconfigure
+          ansible.builtin.command: dpkg --configure -a
+          register: dpkg_repair_after_reconfigure
+          changed_when: "'Setting up' in dpkg_repair_after_reconfigure.stdout"
+          failed_when: false
+          environment:
+            DEBIAN_FRONTEND: noninteractive
+
+        - name: Install GitLab CE package (retry)
+          ansible.builtin.apt:
+            name: "gitlab-{{ gitlab_edition }}"
+            state: present
+            update_cache: false
+          register: gitlab_install_attempt_2
+          failed_when: false
+          environment:
+            EXTERNAL_URL: "{{ gitlab_external_url }}"
+            GITLAB_OMNIBUS_CONFIG: "{{ gitlab_omnibus_config_inline }}"
+            DEBIAN_FRONTEND: noninteractive
+
+    - name: Ensure GitLab package is fully installed
+      ansible.builtin.command: "dpkg-query -W -f=${Status} gitlab-{{ gitlab_edition }}"
+      register: gitlab_dpkg_status
+      changed_when: false
+      failed_when: "'install ok installed' not in gitlab_dpkg_status.stdout"
+
+    - name: Configure GitLab omnibus settings
+      ansible.builtin.blockinfile:
+        path: /etc/gitlab/gitlab.rb
+        marker: "# {mark} ANSIBLE MANAGED GITLAB"
+        block: |
+          external_url '{{ gitlab_external_url }}'
+          letsencrypt['enable'] = false
+          nginx['redirect_http_to_https'] = true
+          nginx['ssl_certificate'] = "{{ gitlab_cert_path }}"
+          nginx['ssl_certificate_key'] = "{{ gitlab_key_path }}"
+      notify: Reconfigure GitLab
+
+    - name: Apply GitLab configuration now
+      ansible.builtin.meta: flush_handlers
+
+    - name: Read initial root password file if present
+      ansible.builtin.slurp:
+        src: /etc/gitlab/initial_root_password
+      register: gitlab_root_password_file
+      failed_when: false
+      changed_when: false
+
+    - name: Display where to find the initial root password
+      ansible.builtin.debug:
+        msg: >-
+          Initial root password is in /etc/gitlab/initial_root_password
+          (GitLab may remove it automatically after first reconfigure).
+
+  handlers:
+    - name: Reconfigure GitLab
+      ansible.builtin.command: gitlab-ctl reconfigure

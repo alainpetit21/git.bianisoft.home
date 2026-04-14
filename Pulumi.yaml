@@ -1,0 +1,4 @@
+name: gitlab-proxmox
+runtime:
+  name: python
+description: Create, provision, and configure a GitLab CE VM on Proxmox VE using Pulumi + Ansible

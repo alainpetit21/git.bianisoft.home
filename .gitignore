@@ -1,0 +1,22 @@
+# Python
+*.py[cod]
+.venv/
+.vscode/
+
+# Pulumi local state and stack configs (can contain secrets)
+.pulumi/
+Pulumi.*.yaml
+!Pulumi.*.yaml.example
+
+# Ansible runtime artifacts
+*.retry
+ansible/.facts/
+
+# Local environment files
+.env
+.env.*
+
+# All Byte-compiled Python files
+__pycache__/
+iac/__pycache__/
+iac/components/__pycache__/

@@ -1,0 +1,31 @@
+config:
+  proxmox:endpoint: https://192.168.0.10:8006/api2/json
+  proxmox:insecure: true
+  proxmox:apiTokenId: pulumi@pve!iac
+  proxmox:sshUsername: root
+
+  vm:nodeName: pve
+  vm:storageName: local-lvm
+  vm:networkBridge: vmbr0
+  vm:name: gitlab-ce
+  vm:vmId: 611
+  vm:cpuCores: 4
+  vm:memoryMb: 8192
+  vm:diskGb: 200
+  vm:imageDatastoreName: local
+  vm:imageContentType: iso
+  vm:imageFileName: debian-12-genericcloud-amd64.img
+  vm:imageUrl: https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2
+  vm:imageVerifyTls: true
+  vm:ipAddress: 192.168.0.11
+  vm:ipCidr: 24
+  vm:gateway: 192.168.0.1
+  vm:dnsServers:
+    - 192.168.0.1
+  vm:fqdn: git.bianisoft.home
+  vm:ansibleUser: ansible
+  vm:sshPublicKey: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIBKNsZrURbyZyD+AY7l2cnkoXHO4CMbeHs5/EDlIw3pp proxmox
+
+  ansible:privateKeyPath: ~/.ssh/id_ed25519
+  ansible:pythonInterpreter: /usr/bin/python3
+  ansible:playbookPath: ansible/playbooks/gitlab-ce.yml
